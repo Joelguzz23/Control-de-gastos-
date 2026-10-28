@@ -1,1 +1,634 @@
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { Plus, Trash2, Edit3, X, Check, Flame, Trophy, TrendingUp, Sparkles, ChevronLeft, ChevronRight, BarChart3, Download, Upload } from "lucide-react";
 
+// ── Paleta ────────────────────────────────────────────────
+const C = {
+  bg:"#0f0f0f", card:"#161616", border:"#2a2a2a",
+  accent:"#e8673a", success:"#6b9e7a", text:"#e8e8e8",
+  muted:"#666", faint:"#333",
+  pastel:["#a8c5da","#b8d4b8","#e8a89c","#c4b5d4","#e8d5a0","#a0c4c4","#d4a8b8","#b8c4a0"],
+};
+const EMOJIS = ["🏃","💧","📚","🧘","🍎","💪","😴","✍️","🎵","🧠","🌿","🎯","🚴","🥗","☀️","🎨"];
+const MESES  = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const DIAS_S = ["Do","Lu","Ma","Mi","Ju","Vi","Sá"];
+const DIAS_L = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+
+// ── Detección de entorno ──────────────────────────────────
+// Detecta app móvil de Claude o viewport estrecho
+const IS_CLAUDE_APP = (() => {
+  try {
+    const ua = navigator.userAgent || "";
+    const narrow = window.innerWidth < 768;
+    const claudeHints = /Claude|Anthropic/i.test(ua);
+    // En la app de Claude el viewport suele ser estrecho y el UA puede incluir hints
+    return narrow || claudeHints;
+  } catch { return false; }
+})();
+
+// ── Utils ─────────────────────────────────────────────────
+const fmt    = d => d.toISOString().split("T")[0];
+const todayS = () => fmt(new Date());
+const dim    = (y,m) => new Date(y,m+1,0).getDate();
+const fdow   = (y,m) => new Date(y,m,1).getDay();
+const fechaL = () => { const d=new Date(); return `${DIAS_L[d.getDay()]}, ${d.getDate()} de ${MESES[d.getMonth()]} de ${d.getFullYear()}`; };
+
+function streak(checks) {
+  let s=0, d=new Date();
+  while(checks[fmt(d)]) { s++; d.setDate(d.getDate()-1); }
+  return s;
+}
+function bestStreak(checks) {
+  const ds=Object.keys(checks).filter(k=>checks[k]).sort();
+  if(!ds.length) return 0;
+  let b=1,c=1;
+  for(let i=1;i<ds.length;i++){const d=(new Date(ds[i])-new Date(ds[i-1]))/86400000;c=d===1?c+1:1;if(c>b)b=c;}
+  return b;
+}
+function mPct(checks,y,m){
+  const t=dim(y,m);
+  return t?Math.round(Array.from({length:t},(_,i)=>checks[fmt(new Date(y,m,i+1))]?1:0).reduce((a,b)=>a+b,0)/t*100):0;
+}
+function dPct(habits,ds){
+  return habits.length?Math.round(habits.filter(h=>h.checks[ds]).length/habits.length*100):0;
+}
+
+// ── Hook ancho ────────────────────────────────────────────
+function useWidth() {
+  const [w,setW]=useState(window.innerWidth);
+  useEffect(()=>{
+    let t; const h=()=>{clearTimeout(t);t=setTimeout(()=>setW(window.innerWidth),80);};
+    window.addEventListener("resize",h);
+    return()=>window.removeEventListener("resize",h);
+  },[]);
+  return w;
+}
+
+// ════════════════════════════════════════════════════════
+// GRÁFICOS SVG — versión ligera (sin librerías externas)
+// ════════════════════════════════════════════════════════
+
+function Donut({pct,size=100}) {
+  const r=40,cx=50,cy=50,ci=2*Math.PI*r;
+  const col=pct>=70?C.success:C.accent;
+  const d=ci*(pct/100),g=ci-d;
+  return (
+    <div style={{position:"relative",width:size,height:size,flexShrink:0}}>
+      <svg width={size} height={size} viewBox="0 0 100 100">
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="#1e1e1e" strokeWidth={11}/>
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke={col} strokeWidth={11}
+          strokeDasharray={`${d} ${g}`} strokeLinecap="round"
+          transform={`rotate(-90 ${cx} ${cy})`}/>
+      </svg>
+      <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column"}}>
+        <span style={{fontFamily:"Fraunces,serif",fontSize:size<90?18:20,fontWeight:900,color:col,lineHeight:1}}>{pct}%</span>
+        <span style={{fontSize:8,color:C.muted}}>general</span>
+      </div>
+    </div>
+  );
+}
+
+// Multiline area chart — solo SVG nativo
+function MultiLine({habits,calDates,h=130}) {
+  const W=480,pL=6,pR=6,pT=6,pB=14,iW=W-pL-pR,iH=h-pT-pB,n=calDates.length;
+  const vis=habits.slice(0,6);
+  if(!vis.length) return <Placeholder h={h}/>;
+  const xf=i=>pL+(i/Math.max(n-1,1))*iW;
+  const yf=v=>pT+iH-(v/100)*iH;
+  return (
+    <svg viewBox={`0 0 ${W} ${h}`} width="100%" height={h} style={{display:"block"}}>
+      <defs>
+        {vis.map(hb=>(
+          <linearGradient key={hb.id} id={`g${hb.id}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={hb.color} stopOpacity="0.25"/>
+            <stop offset="100%" stopColor={hb.color} stopOpacity="0"/>
+          </linearGradient>
+        ))}
+      </defs>
+      <line x1={pL} x2={W-pR} y1={yf(50)} y2={yf(50)} stroke="#1e1e1e" strokeWidth="1"/>
+      <line x1={pL} x2={W-pR} y1={yf(100)} y2={yf(100)} stroke="#1e1e1e" strokeWidth="1"/>
+      {vis.map(hb=>{
+        const days=calDates.map((ds,i)=>({i,v:hb.checks[ds]?100:0}));
+        const segs=[];let sg=null;
+        days.forEach(({i,v})=>{if(v){if(!sg)sg=[i];else sg.push(i);}else{if(sg){segs.push(sg);sg=null;}}});
+        if(sg)segs.push(sg);
+        let lp="";let pv=null;
+        days.forEach(({i,v})=>{if(v)lp+=pv?` L${xf(i)},${yf(100)}`:`M${xf(i)},${yf(100)}`;pv=v;});
+        return (
+          <g key={hb.id}>
+            {segs.map((s,si)=>{
+              const pts=s.map(i=>`${xf(i)},${yf(100)}`).join(" ");
+              const bot=[...s].reverse().map(i=>`${xf(i)},${yf(0)}`).join(" ");
+              return <polygon key={si} points={`${pts} ${bot}`} fill={`url(#g${hb.id})`}/>;
+            })}
+            {lp&&<path d={lp} fill="none" stroke={hb.color} strokeWidth="1.8" strokeLinecap="round"/>}
+            {days.filter(d=>d.v).map(({i})=><circle key={i} cx={xf(i)} cy={yf(100)} r="2" fill={hb.color}/>)}
+          </g>
+        );
+      })}
+      {[0,Math.floor((n-1)/2),n-1].map(i=>(
+        <text key={i} x={xf(i)} y={h} textAnchor="middle" fill={C.muted} fontSize="8">{i+1}</text>
+      ))}
+    </svg>
+  );
+}
+
+// Barras horizontales por hábito
+function HabitBars({habits,pcts,compact}) {
+  if(!habits.length) return <Placeholder h={80}/>;
+  const items=[...habits.map((h,i)=>({...h,pct:pcts[i]||0}))].sort((a,b)=>b.pct-a.pct).slice(0,7);
+  const rh=compact?22:26;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:compact?5:7}}>
+      {items.map(it=>(
+        <div key={it.id} style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{width:compact?80:100,flexShrink:0,display:"flex",alignItems:"center",gap:4,overflow:"hidden"}}>
+            <span style={{fontSize:compact?12:14,flexShrink:0}}>{it.emoji}</span>
+            <span style={{fontSize:compact?9:10,color:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontFamily:"Fraunces,serif"}}>{it.name}</span>
+          </div>
+          <div style={{flex:1,height:rh,background:"#1a1a1a",borderRadius:5,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${it.pct}%`,minWidth:it.pct?3:0,background:it.color,borderRadius:5}}/>
+          </div>
+          <span style={{width:30,textAlign:"right",fontSize:compact?10:11,fontWeight:700,fontFamily:"Fraunces,serif",color:it.color,flexShrink:0}}>{it.pct}%</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Pie SVG
+function Pie({slices,size=120}) {
+  const ok=slices.filter(s=>s.v>0);
+  if(!ok.length) return <Placeholder h={size}/>;
+  const tot=ok.reduce((a,s)=>a+s.v,0)||1;
+  let a=-Math.PI/2; const cx=50,cy=50,r=43;
+  const paths=ok.map(s=>{
+    const sw=(s.v/tot)*2*Math.PI;
+    const x1=cx+r*Math.cos(a),y1=cy+r*Math.sin(a);
+    a+=sw;
+    const x2=cx+r*Math.cos(a),y2=cy+r*Math.sin(a);
+    return {d:`M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${sw>Math.PI?1:0} 1 ${x2},${y2} Z`,col:s.col};
+  });
+  return <svg viewBox="0 0 100 100" width={size} height={size}>{paths.map((p,i)=><path key={i} d={p.d} fill={p.col} stroke="#161616" strokeWidth="1"/>)}</svg>;
+}
+
+function Placeholder({h=120}) {
+  return <div style={{height:h,display:"flex",alignItems:"center",justifyContent:"center",color:C.muted,fontSize:11}}>Sin datos</div>;
+}
+
+// ════════════════════════════════════════════════════════
+// COMPONENTE PRINCIPAL
+// ════════════════════════════════════════════════════════
+export default function HabitTracker() {
+  const vw   = useWidth();
+  // Modo compacto: app Claude o pantalla estrecha
+  const mob  = vw < 768 || IS_CLAUDE_APP;
+  const tiny = vw < 420;
+
+  const [mottos, setMottos] = useState(()=>{ try{return JSON.parse(localStorage.getItem("habits-mottos-v1"))||["","",""];}catch{return ["","",""];} });
+  const [editMotto, setEditMotto] = useState(null);
+  const mottoRef = useRef(null);
+  useEffect(()=>{ localStorage.setItem("habits-mottos-v1",JSON.stringify(mottos)); },[mottos]);
+  const saveMotto = (i,val)=>{ const m=[...mottos]; m[i]=val.slice(0,80); setMottos(m); setEditMotto(null); };
+
+  const [habits,setHabits] = useState(()=>{ try{return JSON.parse(localStorage.getItem("habits-data-v1"))||[];}catch{return [];} });
+  const [calY,setCalY]     = useState(()=>new Date().getFullYear());
+  const [calM,setCalM]     = useState(()=>new Date().getMonth());
+  const [modal,setModal]   = useState(null);
+  const [form,setForm]     = useState({name:"",emoji:"🏃",color:C.pastel[0]});
+  const [toast,setToast]   = useState(null);
+  const importRef          = useRef(null);
+  const ts                 = todayS();
+
+  // Guardar automáticamente
+  useEffect(()=>{ localStorage.setItem("habits-data-v1",JSON.stringify(habits)); },[habits]);
+
+  // Acciones
+  const toggle  = useCallback((id,ds)=>setHabits(p=>p.map(h=>h.id===id?{...h,checks:{...h.checks,[ds]:!h.checks[ds]}}:h)),[]);
+  const save    = useCallback(()=>{ if(!form.name.trim())return; modal?.mode==="edit"?setHabits(p=>p.map(h=>h.id===modal.habit.id?{...h,...form}:h)):setHabits(p=>[...p,{id:Date.now(),name:form.name.trim(),emoji:form.emoji,color:form.color,checks:{}}]); setModal(null); },[form,modal]);
+  const del     = useCallback((id)=>setHabits(p=>p.filter(h=>h.id!==id)),[]);
+  const openNew = ()=>{ setForm({name:"",emoji:"🏃",color:C.pastel[0]}); setModal({mode:"new"}); };
+  const openEd  = h=>{ setForm({name:h.name,emoji:h.emoji,color:h.color}); setModal({mode:"edit",habit:h}); };
+
+  const mkToast = (msg,ok=true)=>{ setToast({msg,ok}); setTimeout(()=>setToast(null),3000); };
+
+  // Export
+  const doExport = ()=>{
+    const d=fmt(new Date());
+    const b=new Blob([JSON.stringify(habits,null,2)],{type:"application/json"});
+    const u=URL.createObjectURL(b); const a=document.createElement("a");
+    a.href=u; a.download=`habits-backup-${d}.json`; a.click(); URL.revokeObjectURL(u);
+    mkToast(`Exportado: habits-backup-${d}.json`);
+  };
+  // Import
+  const doImport = e=>{
+    const f=e.target.files?.[0]; if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      try{
+        const data=JSON.parse(ev.target.result);
+        if(!Array.isArray(data)||!data.every(h=>h.id&&h.name&&typeof h.checks==="object")) throw new Error("Formato inválido");
+        if(!window.confirm(`¿Reemplazar datos con ${data.length} hábito(s)?`))return;
+        setHabits(data); mkToast(`✓ ${data.length} hábito(s) importados`);
+      }catch(err){ mkToast(`✗ ${err.message}`,false); }
+      finally{ e.target.value=""; }
+    };
+    r.readAsText(f);
+  };
+  const doReset = ()=>{
+    if(!window.confirm("¿Borrar TODOS los hábitos?"))return;
+    if(!window.confirm("Confirmación final. ¿Continuar?"))return;
+    setHabits([]); mkToast("Datos eliminados",false);
+  };
+
+  // Datos derivados
+  const dInCal  = dim(calY,calM);
+  const calDts  = useMemo(()=>Array.from({length:dInCal},(_,i)=>fmt(new Date(calY,calM,i+1))),[calY,calM,dInCal]);
+  const hPcts   = useMemo(()=>habits.map(h=>mPct(h.checks,calY,calM)),[habits,calY,calM]);
+  const oPct    = useMemo(()=>hPcts.length?Math.round(hPcts.reduce((a,b)=>a+b,0)/hPcts.length):0,[hPcts]);
+  const tdDone  = habits.filter(h=>h.checks[ts]).length;
+  const tdPct   = habits.length?Math.round(tdDone/habits.length*100):0;
+  const pieSlcs = habits.map((h,i)=>({v:hPcts[i]||0,col:C.pastel[i%C.pastel.length]}));
+
+  // Alturas de gráficos según entorno
+  const chH = tiny?90:mob?115:145;
+
+  // Navegar mes
+  const navMon = d=>{ const nd=new Date(calY,calM+d); setCalY(nd.getFullYear()); setCalM(nd.getMonth()); };
+
+  // ── Calendario ──────────────────────────────────────
+  const calCells = useMemo(()=>{
+    const fd=fdow(calY,calM), cells=[];
+    for(let i=0;i<fd;i++) cells.push(<div key={`e${i}`}/>);
+    for(let d=1;d<=dInCal;d++){
+      const ds=fmt(new Date(calY,calM,d));
+      const pct=dPct(habits,ds);
+      const isTd=ds===ts, isFut=ds>ts;
+      const col=isFut?C.faint:pct>=80?C.success:pct>=40?C.accent:pct>0?"#c4a84a":C.muted;
+      cells.push(
+        <div key={d} style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+          padding:tiny?"3px 1px":mob?"4px 1px":"5px 2px",
+          borderRadius:6, background:isTd?"rgba(232,103,58,0.14)":"transparent",
+          border:isTd?`1px solid ${C.accent}`:"1px solid transparent"}}>
+          <span style={{fontSize:tiny?10:mob?11:12,fontWeight:isTd?700:400,color:isTd?C.accent:C.text,lineHeight:1.2}}>{d}</span>
+          {!isFut&&habits.length>0&&<span style={{fontSize:tiny?6:7,color:col,marginTop:1,fontWeight:600}}>{pct}%</span>}
+        </div>
+      );
+    }
+    return cells;
+  },[habits,calY,calM,dInCal,ts,mob,tiny]);
+
+  // ── Mini-grid 30 días con día de semana encima ───────
+  const DIAS_MIN = ["Do","Lu","Ma","Mi","Ju","Vi","Sá"];
+  const miniGrid = h => {
+    const days = Array.from({length:30},(_,i)=>{
+      const d=new Date(); d.setDate(d.getDate()-(29-i));
+      return {ds:fmt(d), dow:d.getDay(), done:!!h.checks[fmt(d)]};
+    });
+    return days.map(({ds,dow,done})=>(
+      <div key={ds} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2,flexShrink:0}}>
+        <span style={{fontSize:tiny?6:7,color:C.muted,fontWeight:600,lineHeight:1}}>{DIAS_MIN[dow]}</span>
+        <div onClick={()=>toggle(h.id,ds)}
+          style={{
+            width:tiny?13:15, height:tiny?13:15,
+            borderRadius:3, cursor:"pointer",
+            background:done?h.color:"transparent",
+            border:`1.5px solid ${done?h.color:ds===ts?"#e8673a":"#444"}`,
+            display:"flex",alignItems:"center",justifyContent:"center",
+            transition:"background .12s,border-color .12s",
+          }}>
+          {done&&<svg width={tiny?7:9} height={tiny?7:9} viewBox="0 0 10 10"><polyline points="1.5,5 4,7.5 8.5,2" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+        </div>
+      </div>
+    ));
+  };
+
+  // ── Estilos comunes ──────────────────────────────────
+  const card = {background:C.card,borderRadius:14,border:`1px solid ${C.border}`,padding:mob?14:22};
+  const lbl  = {fontSize:10,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10};
+
+  return (
+    <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"system-ui,sans-serif",paddingBottom:60}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@700;900&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0;}
+        ::-webkit-scrollbar{width:3px;height:3px}
+        ::-webkit-scrollbar-thumb{background:#333;border-radius:2px}
+        .btn-ac{background:${C.accent};color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:opacity .15s}
+        .btn-ac:hover{opacity:.85}
+        .hcard:hover{background:#1c1c1c!important}
+        .cnav:hover{background:#2a2a2a!important}
+        .sx{overflow-x:auto;-webkit-overflow-scrolling:touch}
+        .row30{display:flex;gap:3px;flex-wrap:nowrap}
+      `}</style>
+
+      <div style={{maxWidth:960,margin:"0 auto",padding:mob?"0 12px":"0 20px"}}>
+
+        {/* ── HEADER ───────────────────────────────────── */}
+        <div style={{padding:mob?"22px 0 16px":"44px 0 28px"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+            <div>
+              <h1 style={{fontFamily:"Fraunces,serif",fontSize:mob?30:50,fontWeight:900,letterSpacing:"-1.5px",lineHeight:1,color:C.text}}>Hábitos</h1>
+              {!mob&&<p style={{color:C.muted,fontSize:13,marginTop:6}}>{fechaL()}</p>}
+            </div>
+            {/* Frases motivacionales — máx 3 */}
+            <div style={{flex:1,display:"flex",flexDirection:"column",gap:5,padding:mob?"0 8px":"0 20px",justifyContent:"center",minWidth:0}}>
+              {mottos.map((m,i)=>(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+                  {editMotto===i?(
+                    <input
+                      ref={mottoRef}
+                      autoFocus
+                      defaultValue={m}
+                      maxLength={80}
+                      onBlur={e=>saveMotto(i,e.target.value)}
+                      onKeyDown={e=>{if(e.key==="Enter"||e.key==="Escape")saveMotto(i,e.target.value);}}
+                      style={{flex:1,background:"transparent",border:"none",borderBottom:`1px solid ${C.accent}`,
+                        color:C.accent,fontSize:mob?12:14,fontStyle:"italic",outline:"none",
+                        fontFamily:"Fraunces,serif",padding:"2px 0",minWidth:0}}
+                    />
+                  ):(
+                    <span
+                      onClick={()=>setEditMotto(i)}
+                      title="Clic para editar"
+                      style={{flex:1,fontSize:mob?11:13,fontStyle:"italic",cursor:"pointer",
+                        color:m?C.accent:"#333",fontFamily:"Fraunces,serif",
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
+                        borderBottom:`1px solid ${m?"transparent":"#2a2a2a"}`,
+                        transition:"color .15s",lineHeight:1.4}}>
+                      {m||<span style={{color:"#2e2e2e",fontSize:10}}>+ añadir frase {i+1}</span>}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+            {/* Controles */}
+            <div style={{display:"flex",alignItems:"center",gap:mob?5:7,flexWrap:"wrap"}}>
+              <input ref={importRef} type="file" accept=".json" onChange={doImport} style={{display:"none"}}/>
+              {/* Importar */}
+              <button onClick={()=>importRef.current?.click()} style={{display:"flex",alignItems:"center",gap:4,background:"#1e1e1e",border:`1px solid ${C.border}`,borderRadius:7,padding:mob?"7px 10px":"8px 13px",color:C.muted,cursor:"pointer",fontSize:12}}>
+                <Upload size={13}/>{!mob&&<span style={{marginLeft:3}}>Importar</span>}
+              </button>
+              {/* Exportar */}
+              <button onClick={doExport} style={{display:"flex",alignItems:"center",gap:4,background:"#1e1e1e",border:`1px solid ${C.border}`,borderRadius:7,padding:mob?"7px 10px":"8px 13px",color:C.muted,cursor:"pointer",fontSize:12}}>
+                <Download size={13}/>{!mob&&<span style={{marginLeft:3}}>Exportar</span>}
+              </button>
+              {/* Resetear */}
+              <button onClick={doReset} style={{display:"flex",alignItems:"center",gap:4,background:"transparent",border:"1px solid #2e1a1a",borderRadius:7,padding:mob?"7px 10px":"8px 13px",color:"#7a3a3a",cursor:"pointer",fontSize:12}}>
+                <X size={13}/>{!mob&&<span style={{marginLeft:3}}>Resetear</span>}
+              </button>
+              {/* Nuevo */}
+              <button className="btn-ac" onClick={openNew} style={{display:"flex",alignItems:"center",gap:5,padding:mob?"8px 12px":"9px 16px",fontSize:mob?13:14,borderRadius:8}}>
+                <Plus size={14}/>{mob?"":"Nuevo hábito"}
+              </button>
+            </div>
+          </div>
+          {mob&&<p style={{color:C.muted,fontSize:11,marginTop:6}}>{fechaL()}</p>}
+        </div>
+
+        {/* ── CALENDARIO ───────────────────────────────── */}
+        <div style={{...card,marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+            <div>
+              <div style={{fontFamily:"Fraunces,serif",fontSize:mob?18:26,fontWeight:700}}>{DIAS_L[new Date().getDay()]} {new Date().getDate()}</div>
+              <div style={{color:C.muted,fontSize:mob?10:12,marginTop:2}}>{MESES[calM]} {calY}</div>
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              {[-1,1].map(d=>(
+                <button key={d} className="cnav" onClick={()=>navMon(d)}
+                  style={{background:"#1e1e1e",border:`1px solid ${C.border}`,borderRadius:7,width:mob?30:34,height:mob?30:34,cursor:"pointer",color:C.text,display:"flex",alignItems:"center",justifyContent:"center",transition:"background .15s"}}>
+                  {d<0?<ChevronLeft size={14}/>:<ChevronRight size={14}/>}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Grid días */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:mob?2:3,marginBottom:3}}>
+            {DIAS_S.map(d=><div key={d} style={{textAlign:"center",fontSize:mob?8:10,color:C.muted,padding:"3px 0",fontWeight:600}}>{d}</div>)}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:mob?2:3}}>{calCells}</div>
+        </div>
+
+        {/* ── ANÁLISIS MENSUAL ──────────────────────────── */}
+        <div style={{marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:12}}>
+            <BarChart3 size={mob?15:17} color={C.accent}/>
+            <span style={{fontFamily:"Fraunces,serif",fontSize:mob?15:19,fontWeight:700}}>Análisis mensual</span>
+            <span style={{fontSize:10,color:C.muted}}>{MESES[calM]} {calY}</span>
+          </div>
+
+          {/* En móvil: columna única; desktop: 2×2 */}
+          <div style={{display:"grid",gridTemplateColumns:mob?"1fr":"1fr 1fr",gap:mob?10:14}}>
+
+            {/* A – Donut + mini barras */}
+            <div style={card}>
+              <div style={lbl}>Completitud del mes</div>
+              <div style={{display:"flex",alignItems:"center",gap:mob?12:18}}>
+                <Donut pct={oPct} size={mob?80:100}/>
+                <div style={{flex:1,display:"flex",flexDirection:"column",gap:mob?6:8}}>
+                  {habits.slice(0,5).map((h,i)=>{
+                    const pct=hPcts[i]||0;
+                    return (
+                      <div key={h.id}>
+                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                          <span style={{fontSize:mob?9:10,color:C.text,fontFamily:"Fraunces,serif",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"68%"}}>{h.emoji} {h.name}</span>
+                          <span style={{fontSize:mob?9:10,color:h.color,fontWeight:700}}>{pct}%</span>
+                        </div>
+                        <div style={{height:3,background:"#222",borderRadius:2,overflow:"hidden"}}>
+                          <div style={{height:"100%",width:`${pct}%`,background:h.color,borderRadius:2}}/>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {!habits.length&&<span style={{color:C.muted,fontSize:11}}>Sin hábitos</span>}
+                </div>
+              </div>
+            </div>
+
+            {/* B – Multi-line */}
+            <div style={card}>
+              <div style={lbl}>Progreso Diario (%)</div>
+              {/* Leyenda mini */}
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+                {habits.slice(0,6).map(h=>(
+                  <div key={h.id} style={{display:"flex",alignItems:"center",gap:3}}>
+                    <div style={{width:7,height:7,borderRadius:"50%",background:h.color}}/>
+                    <span style={{fontSize:8,color:C.muted,maxWidth:45,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{h.name}</span>
+                  </div>
+                ))}
+              </div>
+              <MultiLine habits={habits} calDates={calDts} h={chH}/>
+            </div>
+
+            {/* C – Pie */}
+            <div style={card}>
+              <div style={lbl}>Distribución por hábito</div>
+              <div style={{display:"flex",alignItems:"center",gap:mob?10:14}}>
+                <Pie slices={pieSlcs} size={mob?90:120}/>
+                <div style={{flex:1,display:"flex",flexDirection:"column",gap:mob?4:6}}>
+                  {habits.map((h,i)=>(
+                    <div key={h.id} style={{display:"flex",alignItems:"center",gap:6}}>
+                      <div style={{width:7,height:7,borderRadius:2,background:C.pastel[i%C.pastel.length],flexShrink:0}}/>
+                      <span style={{fontSize:mob?9:10,color:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{h.emoji} {h.name}</span>
+                      <span style={{fontSize:mob?9:10,color:C.text,fontWeight:600,marginLeft:4}}>{hPcts[i]||0}%</span>
+                    </div>
+                  ))}
+                  {!habits.length&&<span style={{color:C.muted,fontSize:10}}>Sin hábitos</span>}
+                </div>
+              </div>
+            </div>
+
+            {/* D – Barras por hábito */}
+            <div style={card}>
+              <div style={lbl}>Completitud por Hábito (Mes)</div>
+              <HabitBars habits={habits} pcts={hPcts} compact={mob}/>
+            </div>
+
+          </div>
+        </div>
+
+        {/* ── BANNER HOY ───────────────────────────────── */}
+        {habits.length>0&&(
+          <div style={{...card,marginBottom:14,display:"flex",alignItems:"center",gap:mob?12:18,background:"linear-gradient(135deg,#1a1a1a,#1e1410)"}}>
+            <div style={{width:mob?38:48,height:mob?38:48,borderRadius:10,background:"rgba(232,103,58,0.12)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              <Sparkles size={mob?17:21} color={C.accent}/>
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}>
+                <span style={{fontFamily:"Fraunces,serif",fontSize:mob?14:17,fontWeight:700}}>Progreso de hoy</span>
+                <span style={{fontFamily:"Fraunces,serif",fontSize:mob?14:17,fontWeight:700,color:tdPct>=80?C.success:C.accent}}>{tdDone}/{habits.length}</span>
+              </div>
+              <div style={{height:5,background:"#222",borderRadius:3,overflow:"hidden"}}>
+                <div style={{height:"100%",width:`${tdPct}%`,background:tdPct>=80?C.success:C.accent,borderRadius:3}}/>
+              </div>
+              <div style={{fontSize:mob?10:11,color:C.muted,marginTop:5}}>
+                {tdPct===100?"🎉 ¡Perfecto!":tdPct>=50?`Vas bien · ${habits.length-tdDone} pendiente(s)`:`Empieza fuerte · ${habits.length-tdDone} pendiente(s)`}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── TARJETAS ─────────────────────────────────── */}
+        {habits.length===0?(
+          <div style={{textAlign:"center",padding:mob?"50px 16px":"70px 20px"}}>
+            <div style={{fontSize:mob?40:52,marginBottom:12}}>✦</div>
+            <div style={{fontFamily:"Fraunces,serif",fontSize:mob?20:26,fontWeight:700,marginBottom:8}}>Sin hábitos aún</div>
+            <div style={{color:C.muted,fontSize:mob?12:14,marginBottom:20}}>Crea tu primer hábito y empieza a construir tu mejor versión.</div>
+            <button className="btn-ac" onClick={openNew} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"10px 20px",fontSize:14,borderRadius:8}}>
+              <Plus size={15}/> Crear primer hábito
+            </button>
+          </div>
+        ):(
+          <div style={{display:"flex",flexDirection:"column",gap:mob?10:14}}>
+            {habits.map(h=>{
+              const sk=streak(h.checks), bk=bestStreak(h.checks);
+              const pct=mPct(h.checks,new Date().getFullYear(),new Date().getMonth());
+              const done=!!h.checks[ts];
+              return (
+                <div key={h.id} className="hcard" style={{...card,transition:"background .2s"}}>
+                  {/* Fila top */}
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:mob?10:14}}>
+                    <div style={{display:"flex",alignItems:"center",gap:mob?9:12}}>
+                      <button onClick={()=>toggle(h.id,ts)}
+                        style={{width:mob?34:40,height:mob?34:40,borderRadius:9,border:`2px solid ${done?h.color:C.border}`,background:done?h.color:"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                        {done?<Check size={mob?14:17} color="#fff" strokeWidth={3}/>:<span style={{fontSize:mob?17:20}}>{h.emoji}</span>}
+                      </button>
+                      <div>
+                        <div style={{fontFamily:"Fraunces,serif",fontSize:mob?14:17,fontWeight:700,color:done?h.color:C.text}}>{h.name}</div>
+                        <div style={{fontSize:mob?9:11,color:C.muted,marginTop:1}}>{done?"✓ Completado hoy":"Pendiente hoy"}</div>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:5}}>
+                      <button onClick={()=>openEd(h)} style={{background:"#1e1e1e",border:`1px solid ${C.border}`,borderRadius:7,width:mob?26:30,height:mob?26:30,cursor:"pointer",color:C.muted,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                        <Edit3 size={mob?11:13}/>
+                      </button>
+                      <button onClick={()=>del(h.id)} style={{background:"#1e1e1e",border:`1px solid ${C.border}`,borderRadius:7,width:mob?26:30,height:mob?26:30,cursor:"pointer",color:C.muted,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                        <Trash2 size={mob?11:13}/>
+                      </button>
+                    </div>
+                  </div>
+                  {/* Stats */}
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:mob?6:10,marginBottom:mob?10:14}}>
+                    {[{ic:<Flame size={11} color={C.accent}/>,l:"Racha",v:`${sk}d`},{ic:<Trophy size={11} color="#c4a84a"/>,l:"Récord",v:`${bk}d`},{ic:<TrendingUp size={11} color={C.success}/>,l:"Mes",v:`${pct}%`}].map(({ic,l,v})=>(
+                      <div key={l} style={{background:"#1a1a1a",borderRadius:8,padding:mob?"7px 8px":"9px 11px",display:"flex",alignItems:"center",gap:mob?5:7}}>
+                        {ic}
+                        <div>
+                          <div style={{fontSize:mob?8:9,color:C.muted}}>{l}</div>
+                          <div style={{fontSize:mob?12:14,fontWeight:700,fontFamily:"Fraunces,serif"}}>{v}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {/* Grid 30 días — scroll horizontal */}
+                  <div>
+                    <div style={{fontSize:mob?9:10,color:C.muted,marginBottom:5}}>Últimos 30 días</div>
+                    <div className="sx"><div style={{display:"flex",gap:mob?3:4,flexWrap:"nowrap"}}>{miniGrid(h)}</div></div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ── MODAL ────────────────────────────────────── */}
+      {modal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",display:"flex",alignItems:mob?"flex-end":"center",justifyContent:"center",zIndex:100,padding:mob?0:16}}
+          onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+          <div style={{background:"#181818",borderRadius:mob?"18px 18px 0 0":"18px",border:`1px solid ${C.border}`,padding:mob?"20px 16px 28px":"28px",width:"100%",maxWidth:mob?"100%":"430px"}}>
+            {mob&&<div style={{width:32,height:4,borderRadius:2,background:C.border,margin:"0 auto 16px"}}/>}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+              <span style={{fontFamily:"Fraunces,serif",fontSize:mob?18:22,fontWeight:700}}>{modal.mode==="new"?"Nuevo hábito":"Editar hábito"}</span>
+              <button onClick={()=>setModal(null)} style={{background:"transparent",border:"none",cursor:"pointer",color:C.muted}}><X size={18}/></button>
+            </div>
+            {/* Nombre */}
+            <div style={{marginBottom:16}}>
+              <label style={{...lbl,display:"block"}}>Nombre</label>
+              <input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}
+                placeholder="Ej: Meditar 10 minutos"
+                onKeyDown={e=>e.key==="Enter"&&save()}
+                style={{width:"100%",background:"#111",border:`1px solid ${C.border}`,borderRadius:9,padding:"11px 13px",color:C.text,fontSize:14,outline:"none",fontFamily:"Fraunces,serif"}}/>
+            </div>
+            {/* Emoji */}
+            <div style={{marginBottom:16}}>
+              <label style={{...lbl,display:"block"}}>Icono</label>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {EMOJIS.map(em=>(
+                  <button key={em} onClick={()=>setForm(f=>({...f,emoji:em}))}
+                    style={{width:mob?32:36,height:mob?32:36,borderRadius:7,border:`1px solid ${form.emoji===em?C.accent:C.border}`,background:form.emoji===em?"rgba(232,103,58,0.15)":"#111",cursor:"pointer",fontSize:mob?15:17}}>
+                    {em}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Color */}
+            <div style={{marginBottom:22}}>
+              <label style={{...lbl,display:"block"}}>Color</label>
+              <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                {C.pastel.map(col=>(
+                  <button key={col} onClick={()=>setForm(f=>({...f,color:col}))}
+                    style={{width:mob?24:26,height:mob?24:26,borderRadius:5,background:col,border:`2px solid ${form.color===col?"#fff":"transparent"}`,cursor:"pointer"}}/>
+                ))}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setModal(null)} style={{flex:1,background:"#1e1e1e",border:`1px solid ${C.border}`,borderRadius:9,padding:"11px",color:C.text,cursor:"pointer",fontSize:13}}>Cancelar</button>
+              <button className="btn-ac" onClick={save} style={{flex:2,borderRadius:9,padding:"11px",fontSize:13}}>{modal.mode==="new"?"Crear hábito":"Guardar"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── TOAST ────────────────────────────────────── */}
+      {toast&&(
+        <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",
+          background:toast.ok?"#1a2a1e":"#2a1a1a",
+          border:`1px solid ${toast.ok?"#3a5a3a":"#5a3a3a"}`,
+          borderRadius:9,padding:"10px 18px",fontSize:12,
+          color:toast.ok?C.success:"#e07070",zIndex:300,
+          whiteSpace:"nowrap",boxShadow:"0 6px 24px rgba(0,0,0,0.6)",pointerEvents:"none"}}>
+          {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
